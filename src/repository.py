@@ -2,7 +2,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from .domain import ConflictError, NotFoundError
+from .domain import ConflictError, NotFoundError, ValidationError
 
 
 def utcnow():
@@ -139,6 +139,105 @@ class SQLiteRepository:
         finally:
             connection.close()
         return self.get_entity(entity_id)
+
+    @staticmethod
+    def _hours_between(a, b):
+        first = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+        second = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+        return abs((first - second).total_seconds()) / 3600.0
+
+    def atomic_release(self, assignment_id, window_hours, actor_id, sample_id, sample_payload):
+        """Atomically check eligibility and release or reject an assignment.
+
+        The license, team-conflict and double-booking checks all run inside one
+        BEGIN IMMEDIATE transaction, so concurrent dispatchers cannot both
+        release assignments for the same inspector within the same time window,
+        and an inspector record cannot change between the check and the release.
+        """
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM entities WHERE id = ?", (assignment_id,)
+            ).fetchone()
+            if not row:
+                raise NotFoundError("assignment not found: " + assignment_id)
+            assignment = self._entity_from_row(row)
+            if assignment["kind"] != "assignment":
+                raise ValidationError("not an assignment: " + assignment_id)
+            if assignment["status"] != "pending":
+                raise ValidationError("assignment is not pending: " + assignment_id)
+            data = assignment["data"]
+            inspector_id = data.get("inspector_id")
+            athlete_id = data.get("athlete_id")
+            scheduled_at = data.get("scheduled_at")
+            inspector_row = connection.execute(
+                "SELECT * FROM entities WHERE id = ?", (inspector_id,)
+            ).fetchone()
+            athlete_row = connection.execute(
+                "SELECT * FROM entities WHERE id = ?", (athlete_id,)
+            ).fetchone()
+            inspector = self._entity_from_row(inspector_row) if inspector_row else None
+            athlete = self._entity_from_row(athlete_row) if athlete_row else None
+            reason = None
+            if not inspector or inspector["status"] != "active":
+                reason = "inspector not found or not active"
+            elif not athlete or athlete["status"] != "active":
+                reason = "athlete not found or not active"
+            else:
+                license_expiry = inspector["data"].get("license_expiry")
+                if not license_expiry or str(license_expiry) < str(scheduled_at)[:10]:
+                    reason = "inspector license expired on the inspection day"
+                elif inspector["data"].get("team") and inspector["data"].get("team") == athlete["data"].get("team"):
+                    reason = "inspector is on the same team as the athlete"
+            if reason is None:
+                others = connection.execute(
+                    "SELECT * FROM entities WHERE kind = 'assignment' AND status = 'released' AND id != ?",
+                    (assignment_id,),
+                ).fetchall()
+                for other_row in others:
+                    other = self._entity_from_row(other_row)
+                    if other["data"].get("inspector_id") != inspector_id:
+                        continue
+                    other_scheduled = other["data"].get("scheduled_at")
+                    if other_scheduled and self._hours_between(other_scheduled, scheduled_at) < window_hours:
+                        reason = "inspector already booked within the time window"
+                        break
+            now = utcnow()
+            if reason:
+                rejected = dict(data)
+                rejected["rejection_reason"] = reason
+                rejected["rejected_at"] = now
+                connection.execute(
+                    "UPDATE entities SET status = 'rejected', version = version + 1, data = ?, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (json.dumps(rejected, ensure_ascii=False, sort_keys=True), now, assignment_id, assignment["version"]),
+                )
+                connection.commit()
+                return self.get_entity(assignment_id), None, reason
+            released = dict(data)
+            released["released_at"] = now
+            connection.execute(
+                "UPDATE entities SET status = 'released', version = version + 1, data = ?, updated_at = ? "
+                "WHERE id = ? AND version = ?",
+                (json.dumps(released, ensure_ascii=False, sort_keys=True), now, assignment_id, assignment["version"]),
+            )
+            sample_data = dict(sample_payload)
+            sample_data["inspector_id"] = inspector_id
+            sample_data["assignment_id"] = assignment_id
+            sample_data["license_status"] = "valid"
+            connection.execute(
+                "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                "VALUES (?, 'sample', 'scheduled', 1, ?, ?, ?, ?)",
+                (sample_id, json.dumps(sample_data, ensure_ascii=False, sort_keys=True), actor_id, now, now),
+            )
+            connection.commit()
+            return self.get_entity(assignment_id), self.get_entity(sample_id), None
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def append_audit(self, entity_id, actor_id, actor_role, action, from_status, to_status, detail):
         with self._connect() as connection:

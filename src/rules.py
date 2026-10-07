@@ -8,6 +8,46 @@ from .domain import (
 )
 
 
+def _validate_date(value, field):
+    try:
+        datetime.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        raise ValidationError("%s must be a valid YYYY-MM-DD date" % field)
+
+
+def _validate_inspector(actor, data, lookup):
+    for field in ("name", "license_no", "license_expiry", "team"):
+        if not data.get(field):
+            raise ValidationError("missing required field: " + field)
+    _validate_date(data["license_expiry"], "license_expiry")
+
+
+def _validate_inspector_update(actor, entity, data, lookup):
+    allowed = ("name", "license_no", "license_expiry", "team")
+    patch = {key: data[key] for key in allowed if key in data and data[key] is not None}
+    if "license_expiry" in patch:
+        _validate_date(patch["license_expiry"], "license_expiry")
+    if not patch:
+        raise ValidationError("inspector update requires at least one field")
+    return patch
+
+
+def _validate_assignment(actor, data, lookup):
+    inspector = _find_one(lookup, "inspector", "id", data.get("inspector_id"))
+    if not inspector or inspector["status"] != "active":
+        raise ValidationError("assignment requires an active inspector")
+    athlete = _find_one(lookup, "athlete", "id", data.get("athlete_id"))
+    if not athlete or athlete["status"] != "active":
+        raise ValidationError("assignment requires an active athlete")
+    scheduled_at = data.get("scheduled_at")
+    if not scheduled_at:
+        raise ValidationError("scheduled_at is required")
+    try:
+        datetime.fromisoformat(str(scheduled_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        raise ValidationError("scheduled_at must be a valid ISO datetime")
+
+
 def _validate_athlete(actor, data, lookup):
     if len(data.get("discipline", "")) < 2:
         raise ValidationError("discipline is too short")
@@ -39,18 +79,18 @@ def _validate_case_decision(actor, entity, data, lookup):
     return {"decided_by": actor.user_id}
 
 
-CUSTOM_CREATE = {'athlete': _validate_athlete, 'sample': _validate_sample, 'case': _validate_case}
-CUSTOM_TRANSITIONS = {('sample', 'report_adverse'): _validate_report_adverse, ('case', 'decide'): _validate_case_decision, ('case', 'resolve_appeal'): _validate_case_decision}
+CUSTOM_CREATE = {'athlete': _validate_athlete, 'sample': _validate_sample, 'case': _validate_case, 'inspector': _validate_inspector, 'assignment': _validate_assignment}
+CUSTOM_TRANSITIONS = {('sample', 'report_adverse'): _validate_report_adverse, ('case', 'decide'): _validate_case_decision, ('case', 'resolve_appeal'): _validate_case_decision, ('inspector', 'update'): _validate_inspector_update}
 
 
 class RuleEngine:
-    ALIASES = {'athletes': 'athlete', 'samples': 'sample', 'cases': 'case'}
-    INITIAL_STATUS = {'athlete': 'active', 'sample': 'scheduled', 'case': 'open'}
-    TRANSITIONS = {'athlete': {'retire': (('active',), 'retired')}, 'sample': {'collect': (('scheduled',), 'collected'), 'seal': (('collected',), 'sealed'), 'ship': (('sealed',), 'in_transit'), 'receive': (('in_transit',), 'received'), 'analyze': (('received',), 'analyzed'), 'report_adverse': (('analyzed',), 'adverse'), 'clear': (('analyzed',), 'cleared')}, 'case': {'provisional_suspend': (('open',), 'suspended'), 'schedule_hearing': (('suspended',), 'hearing'), 'decide': (('hearing',), 'closed'), 'appeal': (('closed',), 'appeal'), 'resolve_appeal': (('appeal',), 'closed')}}
-    CREATE_REQUIRED = {'athlete': ('name', 'discipline'), 'sample': ('athlete_id', 'sample_code', 'event'), 'case': ('athlete_id', 'sample_id', 'alleged_rule')}
+    ALIASES = {'athletes': 'athlete', 'samples': 'sample', 'cases': 'case', 'inspectors': 'inspector', 'assignments': 'assignment'}
+    INITIAL_STATUS = {'athlete': 'active', 'sample': 'scheduled', 'case': 'open', 'inspector': 'active', 'assignment': 'pending'}
+    TRANSITIONS = {'athlete': {'retire': (('active',), 'retired')}, 'sample': {'collect': (('scheduled',), 'collected'), 'seal': (('collected',), 'sealed'), 'ship': (('sealed',), 'in_transit'), 'receive': (('in_transit',), 'received'), 'analyze': (('received',), 'analyzed'), 'report_adverse': (('analyzed',), 'adverse'), 'clear': (('analyzed',), 'cleared')}, 'case': {'provisional_suspend': (('open',), 'suspended'), 'schedule_hearing': (('suspended',), 'hearing'), 'decide': (('hearing',), 'closed'), 'appeal': (('closed',), 'appeal'), 'resolve_appeal': (('appeal',), 'closed')}, 'inspector': {'update': (('active',), 'active')}}
+    CREATE_REQUIRED = {'athlete': ('name', 'discipline'), 'sample': ('athlete_id', 'sample_code', 'event'), 'case': ('athlete_id', 'sample_id', 'alleged_rule'), 'inspector': ('name', 'license_no', 'license_expiry', 'team'), 'assignment': ('inspector_id', 'athlete_id', 'scheduled_at')}
     ACTION_REQUIRED = {('sample', 'collect'): ('collected_at',), ('sample', 'seal'): ('seal_id',), ('sample', 'ship'): ('carrier',), ('sample', 'receive'): ('lab_id',), ('sample', 'analyze'): ('result',), ('sample', 'clear'): ('reason',), ('case', 'provisional_suspend'): ('reason',), ('case', 'schedule_hearing'): ('hearing_at',), ('case', 'decide'): ('decision',), ('case', 'appeal'): ('grounds',), ('case', 'resolve_appeal'): ('decision',)}
-    CREATE_ROLES = {'athlete': ('admin', 'panel'), 'sample': ('admin', 'inspector'), 'case': ('admin', 'panel')}
-    ROLE_ACTIONS = {'retire': ('admin', 'panel'), 'collect': ('admin', 'inspector'), 'seal': ('admin', 'inspector'), 'ship': ('admin', 'inspector'), 'receive': ('admin', 'lab'), 'analyze': ('admin', 'lab'), 'report_adverse': ('admin', 'lab'), 'clear': ('admin', 'lab'), 'provisional_suspend': ('admin', 'panel'), 'schedule_hearing': ('admin', 'panel'), 'decide': ('admin', 'panel'), 'appeal': ('admin', 'panel'), 'resolve_appeal': ('admin', 'panel')}
+    CREATE_ROLES = {'athlete': ('admin', 'panel'), 'sample': ('admin', 'inspector'), 'case': ('admin', 'panel'), 'inspector': ('admin',), 'assignment': ('dispatcher', 'admin')}
+    ROLE_ACTIONS = {'retire': ('admin', 'panel'), 'collect': ('admin', 'inspector'), 'seal': ('admin', 'inspector'), 'ship': ('admin', 'inspector'), 'receive': ('admin', 'lab'), 'analyze': ('admin', 'lab'), 'report_adverse': ('admin', 'lab'), 'clear': ('admin', 'lab'), 'provisional_suspend': ('admin', 'panel'), 'schedule_hearing': ('admin', 'panel'), 'decide': ('admin', 'panel'), 'appeal': ('admin', 'panel'), 'resolve_appeal': ('admin', 'panel'), 'reconfirm': ('admin', 'panel'), 'update': ('admin',)}
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -86,6 +126,9 @@ class RuleEngine:
 
     def validate_transition(self, actor, entity, action, data, lookup=None):
         kind = self.normalize_kind(entity["kind"])
+        if kind == "case" and action == "reconfirm":
+            self._ensure_role(actor, ("admin", "panel"))
+            return entity["status"], {"needs_reconfirm": False, "reconfirmed_by": actor.user_id}
         transition = self.TRANSITIONS.get(kind, {}).get(action)
         if not transition:
             raise InvalidTransition("unknown action %s for %s" % (action, kind))

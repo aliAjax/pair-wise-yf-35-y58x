@@ -31,6 +31,7 @@ class Role(str, Enum):
     viewer = "viewer"
     admin = "admin"
     inspector = "inspector"
+    dispatcher = "dispatcher"
     lab = "lab"
     panel = "panel"
 
