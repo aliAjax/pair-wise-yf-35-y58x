@@ -30,6 +30,7 @@ class InvalidTransition(DomainError):
 class Role(str, Enum):
     viewer = "viewer"
     admin = "admin"
+    dispatcher = "dispatcher"
     inspector = "inspector"
     lab = "lab"
     panel = "panel"

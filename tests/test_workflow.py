@@ -32,7 +32,22 @@ class WorkflowTest(unittest.TestCase):
 
     def test_full_workflow(self):
         created = {}
-        steps = [{'op': 'create', 'as': 'athlete', 'kind': 'athlete', 'data': {'name': 'A. Rider', 'discipline': 'cycling'}}, {'op': 'create', 'as': 'sample', 'kind': 'sample', 'data': {'athlete_id': '{athlete}', 'sample_code': 'S-001', 'event': 'national-final'}}, {'op': 'transition', 'target': 'sample', 'action': 'collect', 'data': {'collected_at': '2026-01-01T08:00:00Z'}, 'expect': 'collected'}, {'op': 'transition', 'target': 'sample', 'action': 'seal', 'data': {'seal_id': 'SEAL-1'}, 'expect': 'sealed'}, {'op': 'transition', 'target': 'sample', 'action': 'ship', 'data': {'carrier': 'Courier-A'}, 'expect': 'in_transit'}, {'op': 'transition', 'target': 'sample', 'action': 'receive', 'data': {'lab_id': 'LAB-1'}, 'expect': 'received'}, {'op': 'transition', 'target': 'sample', 'action': 'analyze', 'data': {'result': 'adverse'}, 'expect': 'analyzed'}, {'op': 'transition', 'target': 'sample', 'action': 'report_adverse', 'data': {}, 'expect': 'adverse'}, {'op': 'create', 'as': 'case', 'kind': 'case', 'data': {'athlete_id': '{athlete}', 'sample_id': '{sample}', 'alleged_rule': 'substance-1'}}, {'op': 'transition', 'target': 'case', 'action': 'provisional_suspend', 'data': {'reason': 'adverse A sample'}, 'expect': 'suspended'}, {'op': 'transition', 'target': 'case', 'action': 'schedule_hearing', 'data': {'hearing_at': '2026-02-01'}, 'expect': 'hearing'}, {'op': 'transition', 'target': 'case', 'action': 'decide', 'data': {'decision': 'sanction'}, 'expect': 'closed'}]
+        steps = [
+            {'op': 'create', 'as': 'inspector', 'kind': 'inspector', 'data': {'name': 'I. Officer', 'license_no': 'LIC-1', 'license_from': '2025-01-01', 'license_to': '2026-12-31', 'team': 'north'}},
+            {'op': 'create', 'as': 'athlete', 'kind': 'athlete', 'data': {'name': 'A. Rider', 'discipline': 'cycling', 'team': 'south'}},
+            {'op': 'create', 'as': 'assignment', 'kind': 'assignment', 'data': {'athlete_id': '{athlete}', 'inspector_id': '{inspector}', 'window_start': '2026-01-01T08:00:00', 'window_end': '2026-01-01T10:00:00'}},
+            {'op': 'create', 'as': 'sample', 'kind': 'sample', 'data': {'athlete_id': '{athlete}', 'sample_code': 'S-001', 'event': 'national-final', 'assignment_id': '{assignment}'}},
+            {'op': 'transition', 'target': 'sample', 'action': 'collect', 'data': {'collected_at': '2026-01-01T08:00:00'}, 'expect': 'collected'},
+            {'op': 'transition', 'target': 'sample', 'action': 'seal', 'data': {'seal_id': 'SEAL-1'}, 'expect': 'sealed'},
+            {'op': 'transition', 'target': 'sample', 'action': 'ship', 'data': {'carrier': 'Courier-A'}, 'expect': 'in_transit'},
+            {'op': 'transition', 'target': 'sample', 'action': 'receive', 'data': {'lab_id': 'LAB-1'}, 'expect': 'received'},
+            {'op': 'transition', 'target': 'sample', 'action': 'analyze', 'data': {'result': 'adverse'}, 'expect': 'analyzed'},
+            {'op': 'transition', 'target': 'sample', 'action': 'report_adverse', 'data': {}, 'expect': 'adverse'},
+            {'op': 'create', 'as': 'case', 'kind': 'case', 'data': {'athlete_id': '{athlete}', 'sample_id': '{sample}', 'alleged_rule': 'substance-1'}},
+            {'op': 'transition', 'target': 'case', 'action': 'provisional_suspend', 'data': {'reason': 'adverse A sample'}, 'expect': 'suspended'},
+            {'op': 'transition', 'target': 'case', 'action': 'schedule_hearing', 'data': {'hearing_at': '2026-02-01'}, 'expect': 'hearing'},
+            {'op': 'transition', 'target': 'case', 'action': 'decide', 'data': {'decision': 'sanction'}, 'expect': 'closed'},
+        ]
         for step in steps:
             if step["op"] == "create":
                 entity = self.service.create(
@@ -52,6 +67,10 @@ class WorkflowTest(unittest.TestCase):
                 )
             if "expect" in step:
                 self.assertEqual(entity["status"], step["expect"])
+        sample = self.service.get(created["sample"])
+        self.assertEqual(sample["data"]["inspector_id"], created["inspector"])
+        case = self.service.get(created["case"])
+        self.assertEqual(case["data"]["inspector_id"], created["inspector"])
 
 
 if __name__ == "__main__":
